@@ -1,0 +1,52 @@
+#version 460
+// Вычислительный скиннинг: исходные вершины меша (bind pose) + веса костей + палитра костей
+// -> скиннутые вершины сущности. Те же вершины берут растеризация, тени и BLAS для ray tracing.
+#extension GL_EXT_buffer_reference : require
+
+layout(local_size_x = 64) in;
+
+// Vertex из C++: 12 float подряд (position 3, normal 3, uv 2, tangent 4) — читаем как массив float,
+// чтобы не зависеть от выравнивания vec3 в std430
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Floats { float f[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer OutFloats { float f[]; };
+struct SkinVertex {
+    uvec4 joints;
+    vec4 weights;
+};
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Skins { SkinVertex s[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Joints { mat4 m[]; };
+
+layout(push_constant) uniform Push {
+    Floats src;
+    Skins skin;
+    Joints joints;
+    OutFloats dst;
+    uint count;
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count)
+        return;
+    uint b = i * 12u;
+    vec3 p = vec3(pc.src.f[b + 0], pc.src.f[b + 1], pc.src.f[b + 2]);
+    vec3 n = vec3(pc.src.f[b + 3], pc.src.f[b + 4], pc.src.f[b + 5]);
+    vec2 uv = vec2(pc.src.f[b + 6], pc.src.f[b + 7]);
+    vec4 t = vec4(pc.src.f[b + 8], pc.src.f[b + 9], pc.src.f[b + 10], pc.src.f[b + 11]);
+
+    SkinVertex s = pc.skin.s[i];
+    mat4 M = s.weights.x * pc.joints.m[s.joints.x] + s.weights.y * pc.joints.m[s.joints.y] +
+             s.weights.z * pc.joints.m[s.joints.z] + s.weights.w * pc.joints.m[s.joints.w];
+
+    vec3 sp = (M * vec4(p, 1.0)).xyz;
+    mat3 M3 = mat3(M);
+    vec3 sn = M3 * n;
+    vec3 st = M3 * t.xyz;
+    sn = dot(sn, sn) > 0.0 ? normalize(sn) : n;
+    st = dot(st, st) > 0.0 ? normalize(st) : t.xyz;
+
+    pc.dst.f[b + 0] = sp.x; pc.dst.f[b + 1] = sp.y; pc.dst.f[b + 2] = sp.z;
+    pc.dst.f[b + 3] = sn.x; pc.dst.f[b + 4] = sn.y; pc.dst.f[b + 5] = sn.z;
+    pc.dst.f[b + 6] = uv.x; pc.dst.f[b + 7] = uv.y;
+    pc.dst.f[b + 8] = st.x; pc.dst.f[b + 9] = st.y; pc.dst.f[b + 10] = st.z; pc.dst.f[b + 11] = t.w;
+}
